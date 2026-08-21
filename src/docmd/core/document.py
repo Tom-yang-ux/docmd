@@ -71,6 +71,10 @@ class Document:
         """是否存在必须确认的字段（门控判断）。"""
         return len(self.pending_fields()) > 0
 
+    def requires_confirmation(self) -> bool:
+        """文档是否含 C/D 字段，因而必须经过 AI 汇总和人工确认。"""
+        return any(f.grade in (FieldGrade.C, FieldGrade.D) for f in self.all_fields())
+
     # ---------- Markdown 输出 ----------
     def to_markdown(self, for_confirmation: bool) -> str:
         """生成 Markdown。

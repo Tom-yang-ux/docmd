@@ -35,6 +35,7 @@ def main() -> int:
         "--paths", str(ROOT / "src"),          # 让分析器找到 docmd 包
         "--collect-all", "pymupdf",
         "--collect-all", "PIL",
+        "--add-data", f"{ROOT / 'assets' / 'pet'};assets/pet",
         "--add-data", f"{ROOT / 'src' / 'docmd' / 'extractors' / 'ocr_sidecar.py'};docmd/extractors",
         # 打包入口（main）会创建数据目录并启动界面
         "src/docmd/run.py",

@@ -4,7 +4,7 @@
 
 门控规则（不可绕过）：
 - 视觉识别仅在真实引擎可用时执行；不可用时抛错并提示安装/配置，不用模拟内容兜底。
-- finalize() 必须同时满足：全部待确认字段已由用户明确确认 + AI 已完整汇总提问。
+- 含 C/D 字段时，finalize() 必须同时满足：全部待确认字段已由用户明确确认 + AI 已完整汇总提问。
 - confirm_field() 要求显式确认值 + 真实来源，拒绝占位文本与自动采用首候选。
 """
 from __future__ import annotations
@@ -35,9 +35,10 @@ class Pipeline:
     def __init__(self, data_dir: str, db: Optional[Database] = None,
                  vision_engine: str = "paddle_ocr"):
         self.data_dir = Path(data_dir)
-        self.out_dir = self.data_dir / "output"
-        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.db = db or Database(str(self.data_dir / "docmd.db"))
+        saved_output_dir = self.db.get_config("model_config", "output_dir")
+        self.out_dir = Path(saved_output_dir) if saved_output_dir else self.data_dir / "output"
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.cache = HashCache(str(self.data_dir))
         self.importer = Importer(str(self.data_dir))
         self.preprocessor = Preprocessor(str(self.data_dir))
@@ -49,6 +50,14 @@ class Pipeline:
     def set_vision_engine(self, engine: str) -> "Pipeline":
         self.vision_engine = engine
         self.vision = make_vision_adapter(engine)
+        return self
+
+    def set_output_dir(self, output_dir: str) -> "Pipeline":
+        """设置并持久化 review、最终 Markdown 和证据文件的输出目录。"""
+        target = Path(output_dir).expanduser().resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        self.out_dir = target
+        self.db.set_config("model_config", "output_dir", str(target))
         return self
 
     # ---------- 主流程 ----------
@@ -64,7 +73,7 @@ class Pipeline:
         return out
 
     def process_one(self, task_id: str, zoom: float = 2.0) -> Document:
-        """对单个任务执行预处理→识别→分级，产出待确认 Document 并保存。"""
+        """执行识别与分级；有 C/D 进入待确认，无 C/D 自动导出最终 Markdown。"""
         task = self.db.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
@@ -80,7 +89,8 @@ class Pipeline:
         text_blocks: list[ContentBlock] = []
         extractor = get_text_extractor(file_type)
         if extractor is not None:
-            text_blocks = self._extract_text_cached(stored, file_type, extractor)
+            text_blocks, text_cache_hit = self._extract_text_cached(stored, file_type, extractor)
+            run["cache_hits"] += int(text_cache_hit)
 
         # 判断是否需要视觉识别
         pdf_scanned = False
@@ -97,21 +107,26 @@ class Pipeline:
             for b in text_blocks:
                 b.meta["engine"] = "text_extractor"
                 doc.add_block(b)
+            run["pages"] = max((b.page or 0 for b in text_blocks), default=1 if text_blocks else 0)
 
         self.db.set_state(task_id, TaskState.GRADING)
         verifier_blocks, verifier_error = self._run_independent_verifier(stored, task_id)
         self._extract_fields(doc, verifier_blocks, verifier_error)
         grade_all(doc)
-        doc.status = "awaiting_confirmation"
+        needs_confirmation = doc.requires_confirmation()
+        doc.status = "awaiting_confirmation" if needs_confirmation else "confirmed"
         self.db.save_doc(task_id, doc)
-        self.db.set_state(task_id, TaskState.AWAITING_CONFIRM)
         self.db.save_metrics(
             task_id, page_count=run["pages"], elapsed_seconds=round(time.perf_counter() - started, 3),
             model_calls=run["calls"] + (1 if verifier_blocks else 0), cache_hits=run["cache_hits"],
             engine=f"{self.vision_engine}+mineru",
         )
 
-        self._write_review(task_id, doc)
+        if needs_confirmation:
+            self.db.set_state(task_id, TaskState.AWAITING_CONFIRM)
+            self._write_review(task_id, doc)
+        else:
+            self.finalize(task_id)
         return doc
 
     def _apply_visual(self, doc: Document, pages, stored: str) -> dict[str, int]:
@@ -205,15 +220,15 @@ class Pipeline:
         """引擎配置指纹：用于缓存键，确保不同配置不串缓存。"""
         return repr(getattr(self.vision, "config_fingerprint", "") or self.vision_engine)
 
-    def _extract_text_cached(self, stored: str, file_type: str, extractor) -> list[ContentBlock]:
-        """文本提取结果按 文件内容+引擎 缓存，同文件同引擎不重复解析。"""
+    def _extract_text_cached(self, stored: str, file_type: str, extractor) -> tuple[list[ContentBlock], bool]:
+        """文本提取结果按 文件内容+引擎 缓存，返回内容及本次是否命中缓存。"""
         key = self.cache.key_for(stored, extractor.engine, file_type)
         cached = self.cache.get(key)
         if cached is not None:
-            return self._blocks_from_cached(cached, 1)
+            return self._blocks_from_cached(cached, 1), True
         blocks = extractor.build_blocks(stored)
         self.cache.put(key, {"blocks": [b.to_dict() for b in blocks]})
-        return blocks
+        return blocks, False
 
     @staticmethod
     def _blocks_from_cached(cached: dict, page: int) -> list[ContentBlock]:
@@ -375,8 +390,8 @@ class Pipeline:
         """导出最终 Markdown 与 evidence.json。
 
         门控：必须
-        1) 所有待确认字段已确认（无 C/D 残留）；
-        2) AI 已完整汇总提问（任务 ai_questioned=True）。
+        1) 所有待确认字段已确认（无未确认的 C/D 残留）；
+        2) 若文档存在 C/D 字段，AI 已完整汇总提问（任务 ai_questioned=True）。
         任一未满足即抛 RuntimeError，不允许绕过。
         """
         doc = self.db.load_doc(task_id)
@@ -384,14 +399,17 @@ class Pipeline:
             raise KeyError(task_id)
         if doc.has_pending():
             raise RuntimeError("存在未确认字段，禁止进入最终文件生成")
-        if not self.db.ai_questioned(task_id):
+        if doc.requires_confirmation() and not self.db.ai_questioned(task_id):
             raise RuntimeError("未完成「AI 汇总提问」，禁止生成最终文件（确认前门控）")
 
         doc.status = "confirmed"
         final_md = self._render_final(doc)
         fd = self.out_dir / f"{task_id}_final.md"
         fd.write_text(final_md, encoding="utf-8")
-        ev = self.out_dir / f"{task_id}_evidence.json"
+        # 审计证据供程序内部追溯使用，不应与用户的最终 Markdown 一起出现在所选导出目录。
+        audit_dir = self.data_dir / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        ev = audit_dir / f"{task_id}_evidence.json"
         ev.write_text(_json(doc.to_dict()), encoding="utf-8")
         self.db.save_doc(task_id, doc)
         self.db.set_state(task_id, TaskState.CONFIRMED)

@@ -39,6 +39,22 @@ def pipeline(tmp_path):
 
 
 class TestPipeline:
+    def test_no_c_or_d_fields_auto_exports_to_configured_directory(self, tmp_path, pipeline):
+        """只有 A/B 字段时跳过 AI/人工确认，直接输出最终 Markdown。"""
+        target = tmp_path / "chosen-output"
+        pipeline.set_output_dir(str(target))
+        src = tmp_path / "plain.pdf"
+        _make_invoice_pdf(src, ["普通正文，没有需要提取的关键字段。"])
+        tid = pipeline.import_files([str(src)])[0]["task_id"]
+
+        doc = pipeline.process_one(tid)
+
+        assert doc.requires_confirmation() is False
+        assert pipeline.db.get_task(tid)["state"] == "done"
+        assert Path(pipeline.final_path(tid)).parent == target.resolve()
+        assert Path(pipeline.final_path(tid)).exists()
+        assert not Path(pipeline.review_path(tid)).exists()
+
     def test_full_flow_clean_text_with_ai_gate(self, tmp_path, pipeline):
         """可复制文本：字段分级 → AI 已提问 → 无待确认 → 可 finalize。"""
         src = tmp_path / "发票.pdf"
@@ -60,7 +76,8 @@ class TestPipeline:
         assert "document_status: confirmed" in content
         assert "可直接用于后续 AI" in content
         assert pipeline.db.get_task(tid)["state"] == "done"
-        assert (tmp_path / "data" / "output" / f"{tid}_evidence.json").exists()
+        assert (tmp_path / "data" / "audit" / f"{tid}_evidence.json").exists()
+        assert not (tmp_path / "data" / "output" / f"{tid}_evidence.json").exists()
 
     def test_review_markdown_embeds_ai_gate_instruction(self, tmp_path, pipeline):
         src = tmp_path / "发票.pdf"
@@ -170,6 +187,7 @@ class TestPipeline:
         metrics = pipeline.db.metrics(tid)
         assert metrics is not None
         assert metrics["elapsed_seconds"] >= 0
+        assert metrics["cache_hits"] == 1
 
     def test_mock_engine_is_explicit_only(self, tmp_path):
         """mock 引擎用于演示：只为显式选择时可用。"""

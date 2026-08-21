@@ -47,7 +47,7 @@ class ProcessWorker(QThread):
 class MainWindow(QMainWindow):
     SUPPORTED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg"}
 
-    def __init__(self, data_dir: str, db=None):
+    def __init__(self, data_dir: str, db=None, pipeline: Pipeline | None = None):
         super().__init__()
         self.setWindowTitle("DocMD 高可信 Markdown 工具")
         self.resize(560, 430)
@@ -55,7 +55,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._quitting = False
         # 生产默认必须使用真实文档视觉模型；Mock 仅能由测试代码显式选择。
-        self.pipeline = Pipeline(data_dir, db=db, vision_engine="paddle_ocr")
+        self._owns_pipeline = pipeline is None
+        self.pipeline = pipeline or Pipeline(data_dir, db=db, vision_engine="paddle_ocr")
         self._build_ui()
         self._build_tray()
 
@@ -90,7 +91,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_tasks_tab(), "开始")
         tabs.addTab(self._build_confirm_tab(), "待确认")
-        tabs.addTab(self._build_ai_tab(), "AI 设置")
+        tabs.addTab(self._build_ai_tab(), "AI 工作台")
         self.setCentralWidget(tabs)
 
     # ---------- 任务页 ----------
@@ -127,6 +128,16 @@ class MainWindow(QMainWindow):
         top.addStretch(1)
         lay.addLayout(top)
 
+        output_row = QHBoxLayout()
+        self.output_dir_label = QLabel()
+        self.btn_output_dir = QPushButton("选择输出位置")
+        self.btn_output_dir.clicked.connect(self._choose_output_dir)
+        output_row.addWidget(QLabel("生成位置："))
+        output_row.addWidget(self.output_dir_label, 1)
+        output_row.addWidget(self.btn_output_dir)
+        lay.addLayout(output_row)
+        self._update_output_dir_label()
+
         # 任务列表
         self.task_list = QListWidget()
         self.task_list.itemSelectionChanged.connect(self._on_task_selected)
@@ -143,6 +154,23 @@ class MainWindow(QMainWindow):
             QPushButton#dropZone:hover { background: #e2f2e5; }
         """)
         return w
+
+    def _update_output_dir_label(self) -> None:
+        self.output_dir_label.setText(str(self.pipeline.out_dir))
+        self.output_dir_label.setToolTip(str(self.pipeline.out_dir))
+
+    def _choose_output_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "选择生成文件的位置", str(self.pipeline.out_dir))
+        if not chosen:
+            return
+        try:
+            self.pipeline.set_output_dir(chosen)
+        except OSError as e:
+            QMessageBox.warning(self, "无法设置输出位置", str(e))
+            return
+        self._update_output_dir_label()
+        self.status_label.setText("已设置生成位置；之后的待确认、最终 Markdown 和证据文件都会保存到此处。")
 
     def _on_import(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -189,9 +217,12 @@ class MainWindow(QMainWindow):
     def _refresh_tasks(self):
         self.task_list.clear()
         for t in self.pipeline.db.list_tasks():
-            states = {0: "已导入", 1: "预处理", 2: "识别", 3: "分级",
-                      4: "等待确认", 5: "已确认", 6: "已完成"}
-            self.task_list.addItem(f"{t['task_id']}  [{t.get('state','?')}]  {t['title']}")
+            states = {"imported": "已导入", "preprocessing": "预处理中",
+                      "recognizing": "识别中", "grading": "分级中",
+                      "awaiting_confirmation": "等待确认", "confirmed": "已确认",
+                      "done": "已完成"}
+            state = t.get("state", "?")
+            self.task_list.addItem(f"{t['task_id']}  [{states.get(state, state)}]  {t['title']}")
 
     def _on_task_selected(self):
         item = self.task_list.currentItem()
@@ -246,9 +277,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "处理失败", error)
         else:
             metrics = self.pipeline.db.metrics(task_id) or {}
+            task = self.pipeline.db.get_task(task_id) or {}
+            prefix = "无 C/D 待确认项，已直接生成最终 Markdown" if task.get("state") == "done" else "处理完成，发现 C/D 字段，等待确认"
             self.status_label.setText(
-                f"处理完成，字段已分级｜{metrics.get('page_count', 0)} 页｜"
-                f"模型调用 {metrics.get('model_calls', 0)}｜缓存命中 {metrics.get('cache_hits', 0)}｜"
+                f"{prefix}｜{metrics.get('page_count', 0)} 页｜"
+                f"识别模型调用 {metrics.get('model_calls', 0)}｜识别缓存命中 {metrics.get('cache_hits', 0)}｜"
                 f"{metrics.get('elapsed_seconds', 0)} 秒")
             self._refresh_tasks()
 
@@ -308,9 +341,12 @@ class MainWindow(QMainWindow):
         self._confirm_cache = {"task_id": task_id, "doc": doc, "index": {}}
         pending = doc.pending_fields()
         if not pending:
-            state = "AI 已提问" if self.pipeline.db.ai_questioned(task_id) else "AI 未提问"
-            self.confirm_detail.setPlainText(
-                "无待确认字段。\n\n" + state + "\n提示：仍需完成「AI 汇总提问」后才能生成最终文件。")
+            if doc.requires_confirmation():
+                state = "AI 已提问" if self.pipeline.db.ai_questioned(task_id) else "AI 未提问"
+                message = "已无待确认字段。\n\n" + state + "\n提示：含 C/D 的文档仍需完成「AI 汇总提问」后才能生成最终文件。"
+            else:
+                message = "未发现 C/D 待确认字段，最终 Markdown 已自动生成。"
+            self.confirm_detail.setPlainText(message)
         for i, f in enumerate(pending):
             self.confirm_list.addItem(f"{f.key} [{f.grade.value}] 第{f.bbox.page if f.bbox and f.bbox.page else '?'}页")
             self._confirm_cache["index"][i] = f.id
@@ -515,6 +551,7 @@ class MainWindow(QMainWindow):
         self.ai_ctx.setRange(1000, 512000)
         self.ai_ctx.setValue(8000)
         self.ai_secret_label = QLabel("")
+        self.ai_status_label = QLabel("连接状态：未配置；AI 仅会对 C/D 字段发起汇总确认提问。")
 
         form.addRow("API 地址", self.ai_base)
         form.addRow("模型名称", self.ai_model)
@@ -523,6 +560,7 @@ class MainWindow(QMainWindow):
         form.addRow("", self.ai_insecure)
         form.addRow("最大上下文", self.ai_ctx)
         form.addRow("密钥后端", self.ai_secret_label)
+        form.addRow("工作状态", self.ai_status_label)
 
         btns = QHBoxLayout()
         b_load = QPushButton("读取")
@@ -547,6 +585,9 @@ class MainWindow(QMainWindow):
         self.ai_insecure.setChecked((db.get_config("ai_config", "allow_insecure_tls") or "0") == "1")
         self.ai_secret_label.setText(
             f"后端: {self._secret_store.backend}（{'可用' if self._secret_store.available() else '不可用'}）")
+        configured = bool(self.ai_base.text().strip() and self.ai_model.text().strip() and self.ai_key.text().strip())
+        self.ai_status_label.setText(
+            f"连接状态：{'已配置，待任务调用' if configured else '未配置'}｜当前模型：{self.ai_model.text().strip() or '未选择'}")
 
     def _save_ai_config(self):
         db = self.pipeline.db
@@ -621,5 +662,6 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("DocMD 仍在运行", "程序已最小化到系统托盘；右键托盘图标可退出。")
             return
         self.tray.hide()
-        self.pipeline.close()
+        if self._owns_pipeline:
+            self.pipeline.close()
         super().closeEvent(event)

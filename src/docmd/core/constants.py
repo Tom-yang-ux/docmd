@@ -20,7 +20,8 @@ TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.IMPORTED: {TaskState.PREPROCESSING},
     TaskState.PREPROCESSING: {TaskState.RECOGNIZING},
     TaskState.RECOGNIZING: {TaskState.GRADING},
-    TaskState.GRADING: {TaskState.AWAITING_CONFIRM},
+    # 无 C/D 字段的文档不需要确认，分级后可直接生成最终文件。
+    TaskState.GRADING: {TaskState.AWAITING_CONFIRM, TaskState.CONFIRMED},
     TaskState.AWAITING_CONFIRM: {TaskState.CONFIRMED},
     TaskState.CONFIRMED: {TaskState.DONE},
 }
