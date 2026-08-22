@@ -68,6 +68,8 @@ class Pipeline:
         task = self.db.get_task(task_id)
         if task is None:
             raise KeyError(task_id)
+        # 避免重新处理失败后仍把上一次的审阅稿当成本次可用结果打开。
+        self.out_dir.joinpath(f"{task_id}_review_required.md").unlink(missing_ok=True)
         started = time.perf_counter()
         self.db.set_state(task_id, TaskState.PREPROCESSING)
         run = {"pages": 0, "calls": 0, "cache_hits": 0}
@@ -100,6 +102,12 @@ class Pipeline:
 
         self.db.set_state(task_id, TaskState.GRADING)
         verifier_blocks, verifier_error = self._run_independent_verifier(stored, task_id)
+        # 双引擎是处理前提，不是给 C/D 审阅稿补充的一项可选信息。
+        # 第二引擎未运行、失败或返回空内容时，本次任务必须失败，不能输出
+        # review_required.md，更不能把主引擎的结果伪装成“待用户确认”。
+        if verifier_error:
+            self.db.set_state(task_id, TaskState.RECOGNIZING)
+            raise VisionUnavailable(f"独立复核失败，已停止输出：{verifier_error}")
         self._extract_fields(doc, verifier_blocks, verifier_error)
         grade_all(doc)
         doc.status = "awaiting_confirmation"
@@ -160,10 +168,10 @@ class Pipeline:
         return stats
 
     def _run_independent_verifier(self, stored: str, task_id: str) -> tuple[list[ContentBlock], str]:
-        """执行第二个项目 MinerU，失败绝不伪装为双引擎通过。
+        """执行第二个项目 MinerU，失败即中止任务，不产出审阅稿。
 
-        mock 是测试/演示专用引擎，不触发大型真实模型；所有正式引擎均必须
-        尝试 MinerU。失败信息会写进字段 C 级原因与 evidence.json。
+        mock 是测试专用引擎；正式任务和测试任务都必须提供一个独立复核结果。
+        调用方收到错误后必须中止，不能继续分级或导出。
         """
         if getattr(self.vision, "is_mock", False):
             return [], "演示引擎不执行真实双引擎复核"
