@@ -135,18 +135,21 @@ class Document:
         if block.type == BlockType.TABLE:
             # 文档视觉模型通常已给出 Markdown/HTML 表格；不能因无结构化 rows 而丢失它。
             if not block.meta.get("header") and block.text:
-                return block.text
-            lines = ["| " + " | ".join(block.meta.get("header", [])) + " |"]
+                return self._confirmed_text(block.text, block.fields, for_confirmation)
+            header = [self._confirmed_text(str(cell), block.fields, for_confirmation)
+                      for cell in block.meta.get("header", [])]
+            lines = ["| " + " | ".join(header) + " |"]
             lines.append("|" + "|".join(["---"] * len(block.meta.get("header", []))) + "|")
             for row in block.meta.get("rows", []):
-                lines.append("| " + " | ".join(str(c) for c in row) + " |")
+                lines.append("| " + " | ".join(
+                    self._confirmed_text(str(c), block.fields, for_confirmation) for c in row) + " |")
             return "\n".join(lines)
         if block.type == BlockType.FORMULA:
             return f"> 公式: `{block.text}`"
         if block.type == BlockType.IMAGE:
             return f"![{block.text}]({block.source_image or ''})"
         # paragraph / key_field
-        parts = [block.text]
+        parts = [self._confirmed_text(block.text, block.fields, for_confirmation)]
         if block.fields:
             for f in block.fields:
                 if for_confirmation and f.user_confirmed is None and f.grade in (FieldGrade.C, FieldGrade.D):
@@ -163,6 +166,24 @@ class Document:
                     if for_confirmation:
                         parts.append(f"\n> **{f.key}** = {val} ({f.grade.value})")
         return "\n".join(parts)
+
+    @staticmethod
+    def _confirmed_text(text: str, fields: list[Field], for_confirmation: bool) -> str:
+        """最终导出时把用户确认值写回正文，而不只留在 evidence.json。"""
+        if for_confirmation:
+            return text
+        rendered = text
+        for field in fields:
+            if field.user_confirmed is None:
+                continue
+            # 优先用与用户确认值不同的候选替换；每字段只替换一次，避免将
+            # 文档中同值的无关位置全部改掉。无候选时不凭空修改正文。
+            for candidate in field.candidates:
+                old = candidate.text or ""
+                if old and old != field.user_confirmed and old in rendered:
+                    rendered = rendered.replace(old, field.user_confirmed, 1)
+                    break
+        return rendered
 
     def to_dict(self) -> dict:
         return {
