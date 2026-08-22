@@ -26,6 +26,8 @@ def _make_rich_pdf(path: Path) -> None:
 @pytest.fixture
 def pipeline(tmp_path):
     p = Pipeline(str(tmp_path / "data"), vision_engine="mock")
+    from conftest import StubIndependentVerifier
+    p.verifier = StubIndependentVerifier()
     yield p
     p.close()
 
@@ -136,3 +138,18 @@ class TestFieldExtraction:
         assert "待确认清单" not in final_text
         assert "是否确认" not in final_text
         assert "processing_gate: user_confirmation_required" not in final_text
+
+    def test_final_markdown_uses_manual_confirmation_value(self):
+        """确认值必须写回最终正文，不能只存在 evidence.json。"""
+        doc = Document("confirmed", "sample.pdf", "确认值回填")
+        block = ContentBlock("p1", BlockType.PARAGRAPH, "金额: 100.00", page=1)
+        from docmd.core.models import Field, EngineResult
+        f = Field(id="amount", key="金额", field_type="amount", block_id="p1",
+                  is_key_field=True, grade=FieldGrade.C, user_confirmed="120.00")
+        f.candidates.append(EngineResult(engine="paddle_ocr", text="100.00", confidence=0.9))
+        f.candidates.append(EngineResult(engine="mineru", text="100.00", confidence=0.9))
+        block.fields.append(f)
+        doc.add_block(block)
+        final = doc.to_markdown(for_confirmation=False)
+        assert "金额: 120.00" in final
+        assert "金额: 100.00" not in final
