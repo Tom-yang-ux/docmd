@@ -40,8 +40,8 @@ class TestGrading:
         grading.grade_field(f)
         assert f.grade == FieldGrade.C
 
-    def test_low_conf_to_c_or_d(self):
+    def test_single_engine_is_unverified_d(self):
         f = _f(["100.00"])
-        f.candidates[0].confidence = 0.1
         grading.grade_field(f)
-        assert f.grade in (FieldGrade.C, FieldGrade.D)
+        assert f.grade == FieldGrade.D
+        assert "复核未完成" in f.conflict_reason
