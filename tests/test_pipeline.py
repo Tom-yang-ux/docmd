@@ -34,6 +34,8 @@ def _mark_ai_and_confirm(pipeline, tid, doc):
 @pytest.fixture
 def pipeline(tmp_path):
     p = Pipeline(str(tmp_path / "data"), vision_engine="mock")
+    from conftest import StubIndependentVerifier
+    p.verifier = StubIndependentVerifier()
     yield p
     p.close()
 
@@ -148,6 +150,20 @@ class TestPipeline:
         finally:
             p.close()
 
+    def test_verifier_failure_stops_without_review_output(self, tmp_path, pipeline):
+        """第二引擎失败不是 C/D：任务必须失败且不得生成审阅稿。"""
+        class FailingVerifier:
+            def recognize_document(self, _stored):
+                raise VisionUnavailable("MinerU 不可用")
+
+        pipeline.verifier = FailingVerifier()
+        src = tmp_path / "发票.pdf"
+        _make_invoice_pdf(src)
+        tid = pipeline.import_files([str(src)])[0]["task_id"]
+        with pytest.raises(VisionUnavailable, match="独立复核失败"):
+            pipeline.process_one(tid)
+        assert not Path(pipeline.review_path(tid)).exists()
+
     def test_import_idempotent_same_task(self, tmp_path, pipeline):
         src = tmp_path / "发票.pdf"
         _make_invoice_pdf(src)
@@ -180,6 +196,8 @@ class TestPipeline:
         page.draw_rect(pymupdf.Rect(72, 72, 200, 100), color=(0, 0, 0))
         d.save(str(src)); d.close()
         p2 = Pipeline(str(tmp_path / "data2"), vision_engine="mock")
+        from conftest import StubIndependentVerifier
+        p2.verifier = StubIndependentVerifier()
         try:
             tid = p2.import_files([str(src)])[0]["task_id"]
             doc = p2.process_one(tid, zoom=1.0)
