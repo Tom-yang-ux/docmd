@@ -8,7 +8,7 @@
 - A：已确认或高度一致（多引擎文本完全一致）
 - B：高可信，仅格式差异（归一化后一致；行/列/数字格式差异）
 - C：存在候选冲突（候选值不一致）
-- D：无法可靠识别（低置信 / 无候选 / 质量不合格）
+- D：无法可靠识别或未完成独立核验（低置信 / 无候选 / 核验失败）
 """
 from __future__ import annotations
 
@@ -43,8 +43,10 @@ def grade_field(field: Field) -> Field:
 
     independent_engines = {c.engine for c in valid}
     if len(independent_engines) < 2:
-        field.grade = FieldGrade.C
-        field.conflict_reason = "仅有单一识别引擎结果，尚未完成独立复核"
+        # C 只表示“至少两个独立引擎均已返回、但候选互相冲突”。
+        # 单引擎不是冲突，而是未核验，不能被当作可继续确认的结果。
+        field.grade = FieldGrade.D
+        field.conflict_reason = "仅有单一识别引擎结果，独立复核未完成"
         return field
 
     texts = [_normalized(c) for c in valid]
