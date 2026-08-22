@@ -43,11 +43,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     from PySide6.QtWidgets import QApplication
-    from docmd.ui.main_window import MainWindow
+    from docmd.ui.pet_window import PetWindow
 
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
     app = QApplication(sys.argv)
-    win = MainWindow(args.data_dir)
+    win = PetWindow(args.data_dir)
     win.show()
     return app.exec()
 

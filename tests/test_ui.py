@@ -26,7 +26,7 @@ def win(qapp, tmp_path):
 def test_tabs_created(win):
     tabs = win.centralWidget()
     names = [tabs.tabText(i) for i in range(tabs.count())]
-    assert {"开始", "待确认", "AI 设置"} <= set(names)
+    assert {"开始", "待确认", "AI 设置", "模型与环境"} <= set(names)
     assert not hasattr(win, "combo_vision")
     assert hasattr(win, "drop_zone")
     assert hasattr(win, "crop_preview")
@@ -51,3 +51,16 @@ def test_drop_import_helper(win, tmp_path):
     make_cjk_pdf(src, ["金额: 100.00"])
     win._import_paths([str(src)], auto_process=False)
     assert win.task_list.count() >= 1
+
+
+def test_bear_pet_uses_only_high_resolution_frames(qapp, tmp_path):
+    from docmd.ui.pet_window import PetWindow
+
+    pet = PetWindow(str(tmp_path / "pet-data"))
+    try:
+        assert len(pet.frames) == 9
+        assert all(frame.width() >= 400 for frame in pet.frames)
+        assert pet.bear.pixmap() is not None
+        assert pet.control is None
+    finally:
+        pet.close()

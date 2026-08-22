@@ -51,6 +51,24 @@ class Pipeline:
         self.vision = make_vision_adapter(engine)
         return self
 
+    def ensure_dual_engine_ready(self, file_type: str, source_path: str | None = None) -> None:
+        """在创建任务前验证主识别与独立复核均已就绪。"""
+        errors: list[str] = []
+        needs_primary_vision = file_type == "image"
+        if file_type in {"pdf", ".pdf"} and source_path:
+            try:
+                needs_primary_vision = not PdfTextExtractor().build_blocks(source_path)
+            except Exception:
+                # 无法验证 PDF 是否带文本时，按扫描件处理，绝不放行单引擎路径。
+                needs_primary_vision = True
+        if needs_primary_vision and not self.vision.available():
+            errors.append(f"主识别引擎「{self.vision_engine}」不可用：{_engine_hint(self.vision)}")
+        verifier_available = getattr(self.verifier, "available", lambda: True)
+        if not verifier_available():
+            errors.append("独立复核引擎 MinerU 不可用。请在「模型与环境」完成安装后再开始处理。")
+        if errors:
+            raise VisionUnavailable("\n".join(errors))
+
     # ---------- 主流程 ----------
     def import_files(self, paths: Iterable[str]) -> list[dict]:
         """导入并登记任务，返回任务摘要列表。"""

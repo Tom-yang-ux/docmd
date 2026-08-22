@@ -70,12 +70,13 @@ class PaddleOcrAdapter(BaseVisionAdapter):
 
     @staticmethod
     def _sidecar_python() -> Path | None:
-        """Find the preinstalled supported Python runtime for PaddleOCR-VL."""
+        """Find the optional, user-local OCR runtime for both real engines."""
         candidates = []
         if os.environ.get("DOCMD_OCR_PYTHON"):
             candidates.append(Path(os.environ["DOCMD_OCR_PYTHON"]))
-        # Delivery layout: DocMD.exe sits next to the preinstalled OCR venv.
-        candidates.append(Path(sys.executable).resolve().parent / "ocr-runtime" / "Scripts" / "python.exe")
+        # Optional runtime installed after the user enables dual-engine OCR.
+        appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        candidates.append(appdata / "docmd" / "ocr-runtime" / "Scripts" / "python.exe")
         # Development layout.
         candidates.append(Path(__file__).resolve().parents[3] / ".venv-ocr" / "Scripts" / "python.exe")
         return next((item for item in candidates if item.is_file()), None)

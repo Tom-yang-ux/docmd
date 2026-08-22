@@ -41,6 +41,26 @@ def pipeline(tmp_path):
 
 
 class TestPipeline:
+    def test_preflight_refuses_to_start_without_independent_verifier(self, pipeline):
+        """应用层在导入前就必须拦截不具备双引擎的任务。"""
+        class MissingVerifier:
+            def available(self):
+                return False
+
+        pipeline.verifier = MissingVerifier()
+        with pytest.raises(VisionUnavailable, match="独立复核引擎"):
+            pipeline.ensure_dual_engine_ready("pdf")
+
+    def test_preflight_requires_primary_vision_for_images(self, pipeline):
+        class ReadyVerifier:
+            def available(self):
+                return True
+
+        pipeline.verifier = ReadyVerifier()
+        pipeline.vision.available = lambda: False
+        with pytest.raises(VisionUnavailable, match="主识别引擎"):
+            pipeline.ensure_dual_engine_ready("image")
+
     def test_full_flow_clean_text_with_ai_gate(self, tmp_path, pipeline):
         """可复制文本：字段分级 → AI 已提问 → 无待确认 → 可 finalize。"""
         src = tmp_path / "发票.pdf"

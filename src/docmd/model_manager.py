@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -38,10 +40,34 @@ class ModelManager:
         "deepseek_ocr": ("DeepSeek-OCR", ()),
     }
 
+    @staticmethod
+    def runtime_python() -> Path:
+        appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        return appdata / "docmd" / "ocr-runtime" / "Scripts" / "python.exe"
+
+    @staticmethod
+    def _bootstrap_python() -> Path:
+        """Find a supported Python to create the optional OCR environment."""
+        configured = os.environ.get("DOCMD_BOOTSTRAP_PYTHON")
+        candidates = [Path(configured)] if configured else []
+        # uv keeps downloaded CPython runtimes here even when its CLI is not on PATH.
+        candidates.extend(Path.home().glob("AppData/Roaming/uv/python/*/python.exe"))
+        if not getattr(sys, "frozen", False) and sys.version_info[:2] <= (3, 12):
+            candidates.append(Path(sys.executable))
+        return next((path for path in candidates if path.is_file()), Path())
+
+    @classmethod
+    def _runtime_has(cls, module: str) -> bool:
+        runtime = cls.runtime_python()
+        if not runtime.is_file():
+            return False
+        return subprocess.run([str(runtime), "-c", f"import {module}"], capture_output=True,
+                              timeout=15, check=False).returncode == 0
+
     def status(self, key: str, ai_configured: bool = False) -> ModelStatus:
         title, args = self.SPECS[key]
         if key == "paddle_ocr":
-            ok = importlib.util.find_spec("paddleocr") is not None
+            ok = self._runtime_has("paddleocr") or (not getattr(sys, "frozen", False) and importlib.util.find_spec("paddleocr") is not None)
             if ok:
                 try:
                     from paddleocr import PaddleOCRVL  # noqa: F401
@@ -50,8 +76,9 @@ class ModelManager:
                     return ModelStatus(key, title, False, "检测到 PaddleOCR，但缺少 PaddleOCRVL 文档解析管线。", args)
             return ModelStatus(key, title, False, "未安装。", args)
         if key == "mineru":
-            ok = importlib.util.find_spec("mineru") is not None or shutil.which("mineru") is not None
-            return ModelStatus(key, title, ok, "已安装。" if ok else "未安装。", args)
+            ok = self._runtime_has("mineru") or (not getattr(sys, "frozen", False) and importlib.util.find_spec("mineru") is not None)
+            detail = "已安装于用户本地 OCR 环境。" if ok else "未安装；必须与主引擎同时就绪，才允许开始处理。"
+            return ModelStatus(key, title, ok, detail, args)
         return ModelStatus(key, title, ai_configured, "已配置视觉 API。" if ai_configured else "需在 AI 设置中配置视觉 API 与模型。", args)
 
     def all_status(self, ai_configured: bool = False) -> list[ModelStatus]:
@@ -90,11 +117,22 @@ class ModelManager:
         except OSError:
             return DeviceProfile("cpu", "CPU 模式", "GPU 信息读取失败；将使用 CPU，功能不受限制。")
 
-    @staticmethod
-    def install(key: str) -> subprocess.CompletedProcess:
-        _, args = ModelManager.SPECS[key]
+    @classmethod
+    def install(cls, key: str) -> subprocess.CompletedProcess:
+        _, args = cls.SPECS[key]
         if not args:
             raise ValueError("该模型通过 API 配置，不支持本地 pip 安装。")
+        runtime = cls.runtime_python()
+        if not runtime.is_file():
+            bootstrap = cls._bootstrap_python()
+            if not bootstrap.is_file():
+                raise RuntimeError("未找到 Python 3.10–3.12，无法创建 OCR 环境。请安装受支持的 Python 后重试。")
+            runtime.parent.parent.mkdir(parents=True, exist_ok=True)
+            created = subprocess.run([str(bootstrap), "-m", "venv", str(runtime.parent.parent)],
+                                     capture_output=True, text=True, check=False)
+            if created.returncode:
+                raise RuntimeError((created.stderr or created.stdout or "创建 OCR 环境失败")[-3000:])
+        os.environ["DOCMD_OCR_PYTHON"] = str(runtime)
         return subprocess.run(
-            [sys.executable, "-m", "pip", "install", *args], capture_output=True, text=True, check=False,
+            [str(runtime), "-m", "pip", "install", *args], capture_output=True, text=True, check=False,
         )

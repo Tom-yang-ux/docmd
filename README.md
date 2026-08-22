@@ -1,4 +1,11 @@
-# DocMD — 高可信 Markdown 桌面工具
+# DocMD — 双引擎核验 Markdown 工具
+
+> 本项目已暂停维护，源码以当前状态公开，欢迎使用、审阅或二次开发。
+
+DocMD 是一个将 PDF、图片、Word、Excel、PPT 转换为 Markdown 的桌面工具。
+它以「主识别 + MinerU 独立复核」为硬性前提：任一引擎不可用、失败或返回空内容时，任务不会开始处理，也不会输出 Markdown。只有两套独立结果均成功返回后，才会进入字段分级、人工确认与最终 Markdown 导出。
+
+本仓库公开完整源码；OCR 运行时、模型权重和用户文档均不随源码或主安装包分发。首次启用真实双引擎时，可在应用的“模型与环境”页面按需安装，避免普通安装占用数 GB 空间。
 
 把 PDF / 图片 / Word / Excel / PPT 转成带 **A/B/C/D 字段级可信等级** 的 Markdown，
 经 **AI 汇总提问 → 用户确认门控** 后生成最终 `final.md` 与审计 `evidence.json`。
@@ -25,6 +32,14 @@ pip install -r requirements.txt        # 或 pip install -e .
 python -m docmd.run                    # 打开桌面界面
 python -m docmd.run --data-dir .\mydata
 ```
+
+## 桌宠交互
+
+启动后默认显示置顶小熊，而不是传统的主窗口：
+
+- 直接将 PDF、图片、Word、Excel 或 PPT 拖到小熊身上，它会在转换期间播放工作动画；出现 C/D 字段时，双击小熊打开确认面板。
+- 单击小熊会触发开心动画；双击小熊可打开完整管理面板（待确认、AI 与模型设置）。
+- 仅保留小熊桌宠；不包含小女孩、童话场景、视频或其他彩蛋素材。
 
 数据目录结构：
 
@@ -53,7 +68,7 @@ pip install pyinstaller
 python scripts/build.py                 # 生成 dist/DocMD.exe（--windowed）
 ```
 
-> 大型视觉模型权重与 EXE 分离：不把数 GB 模型塞进安装包。
+> 大型视觉模型权重与 EXE 分离：不把数 GB 模型或完整 OCR Python 运行时塞进安装包。
 > “模型与环境”页可检测 GPU 和依赖，并可安装 PaddleOCR-VL / MinerU 依赖。
 > 模型权重与 EXE 分离，首次真实识别时按官方 SDK 下载；未装真实模型时扫描件会被拦截，不会回退 Mock。
 

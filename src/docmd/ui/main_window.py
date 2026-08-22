@@ -47,7 +47,7 @@ class ProcessWorker(QThread):
 class MainWindow(QMainWindow):
     SUPPORTED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg"}
 
-    def __init__(self, data_dir: str, db=None):
+    def __init__(self, data_dir: str, db=None, pipeline: Pipeline | None = None):
         super().__init__()
         self.setWindowTitle("DocMD 高可信 Markdown 工具")
         self.resize(560, 430)
@@ -55,7 +55,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._quitting = False
         # 生产默认必须使用真实文档视觉模型；Mock 仅能由测试代码显式选择。
-        self.pipeline = Pipeline(data_dir, db=db, vision_engine="paddle_ocr")
+        self._owns_pipeline = pipeline is None
+        self.pipeline = pipeline or Pipeline(data_dir, db=db, vision_engine="paddle_ocr")
         self._build_ui()
         self._build_tray()
 
@@ -91,6 +92,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_tasks_tab(), "开始")
         tabs.addTab(self._build_confirm_tab(), "待确认")
         tabs.addTab(self._build_ai_tab(), "AI 设置")
+        tabs.addTab(self._build_models_tab(), "模型与环境")
         self.setCentralWidget(tabs)
 
     # ---------- 任务页 ----------
@@ -226,15 +228,11 @@ class MainWindow(QMainWindow):
         # 默认主引擎固定为 PaddleOCR-VL；程序内部按需触发复核，用户无需选择模型。
         try:
             self.pipeline.set_vision_engine(vision)
+            task = self.pipeline.db.get_task(task_id) or {}
+            self.pipeline.ensure_dual_engine_ready(task.get("file_type", ""), task.get("source_path"))
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "无效识别引擎", str(e))
+            QMessageBox.critical(self, "双引擎未就绪", str(e))
             return
-        available = self.pipeline.vision.available()
-        if not available:
-            QMessageBox.warning(
-                self, "识别引擎不可用",
-                "高可信识别组件尚未完成安装。程序不会用模拟内容代替。\n\n"
-                "请保持联网并重新启动应用；若问题仍存在，请联系交付方处理安装。")
         self.status_label.setText(f"处理中 {task_id}… (引擎:{vision})")
         self.worker = ProcessWorker(self.pipeline, task_id)
         self.worker.finished_task.connect(self._on_worker_done)
@@ -580,7 +578,7 @@ class MainWindow(QMainWindow):
         row.addWidget(install_paddle)
         row.addWidget(install_mineru)
         row.addStretch(1)
-        lay.addWidget(QLabel("模型权重不会打入 EXE。安装依赖后，官方模型会在首次真实识别时下载。"))
+        lay.addWidget(QLabel("双引擎是开始处理的前提。OCR 环境按需安装到用户数据目录，不随 EXE 打包。"))
         lay.addWidget(self.model_gpu_label)
         lay.addWidget(self.model_status)
         lay.addLayout(row)
@@ -593,7 +591,7 @@ class MainWindow(QMainWindow):
         statuses = self._model_manager.all_status(ai_ready)
         self.model_gpu_label.setText("GPU：" + self._model_manager.gpu_summary())
         lines = [f"{s.title}: {'可用' if s.available else '不可用'} — {s.detail}" for s in statuses]
-        lines.append("\n建议：PaddleOCR-VL 为主识别；MinerU/DeepSeek-OCR 仅用于 C/D 页面复核。")
+        lines.append("\n开始处理前必须具备主识别与 MinerU 独立复核；任一不可用时不会创建处理任务或输出文件。")
         self.model_status.setPlainText("\n".join(lines))
 
     def _install_model(self, key: str):
@@ -621,5 +619,6 @@ class MainWindow(QMainWindow):
             self.tray.showMessage("DocMD 仍在运行", "程序已最小化到系统托盘；右键托盘图标可退出。")
             return
         self.tray.hide()
-        self.pipeline.close()
+        if self._owns_pipeline:
+            self.pipeline.close()
         super().closeEvent(event)
